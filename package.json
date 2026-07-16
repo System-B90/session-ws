@@ -1,11 +1,11 @@
 {
-    "name": "@system-b15/session-ws",
-    "version": "0.1.1",
-    "description": "Shared WebSocket session server core, HMAC ticket auth, and React client hooks for System-B15 apps",
+    "name": "@system-b90/session-ws",
+    "version": "0.1.2",
+    "description": "Shared WebSocket session server core, HMAC ticket auth, and React client hooks for System-B90 apps",
     "license": "UNLICENSED",
     "repository": {
         "type": "git",
-        "url": "https://github.com/System-B15/session-ws.git"
+        "url": "https://github.com/System-B90/session-ws.git"
     },
     "publishConfig": {
         "registry": "https://npm.pkg.github.com"
