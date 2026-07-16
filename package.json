@@ -1,0 +1,61 @@
+{
+    "name": "@system-b15/session-ws",
+    "version": "0.1.1",
+    "description": "Shared WebSocket session server core, HMAC ticket auth, and React client hooks for System-B15 apps",
+    "license": "UNLICENSED",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/System-B15/session-ws.git"
+    },
+    "publishConfig": {
+        "registry": "https://npm.pkg.github.com"
+    },
+    "type": "module",
+    "main": "./dist/common.js",
+    "types": "./dist/common.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/common.d.ts",
+            "default": "./dist/common.js"
+        },
+        "./protocol": {
+            "types": "./dist/protocol.d.ts",
+            "default": "./dist/protocol.js"
+        },
+        "./server": {
+            "types": "./dist/server.d.ts",
+            "default": "./dist/server.js"
+        },
+        "./react": {
+            "types": "./dist/react/index.d.ts",
+            "default": "./dist/react/index.js"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
+    },
+    "peerDependencies": {
+        "react": "^19.0.0",
+        "ws": "^8.18.0"
+    },
+    "peerDependenciesMeta": {
+        "react": {
+            "optional": true
+        },
+        "ws": {
+            "optional": true
+        }
+    },
+    "devDependencies": {
+        "typescript": "^5.9.0",
+        "@types/node": "^20",
+        "@types/react": "^19",
+        "@types/ws": "^8.18.1",
+        "react": "^19.0.0",
+        "ws": "^8.18.2"
+    }
+}
