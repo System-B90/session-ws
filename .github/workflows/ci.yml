@@ -1,0 +1,43 @@
+name: CI
+
+on:
+    workflow_dispatch:
+    pull_request:
+        branches: [master]
+    push:
+        branches: [master]
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    # Until now nothing type-checked this package on a PR — the first thing to
+    # compile it was `publish.yml`, which only runs on a published release. A
+    # broken build therefore surfaced at release time instead of at review
+    # time, in a package three apps depend on.
+    build:
+        name: Build + typecheck
+        runs-on: self-hosted
+        timeout-minutes: 15
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+
+            - name: Set up Node
+              uses: actions/setup-node@v6
+              with:
+                  node-version: "24"
+                  cache: npm
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Build
+              run: npm run build
+
+            # `npm run build` emits declarations; --noEmit re-checks without
+            # writing, so a stale dist/ can't mask a type error.
+            - name: Typecheck
+              run: npx tsc -p tsconfig.json --noEmit
