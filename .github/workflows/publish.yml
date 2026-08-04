@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   publish:
-    runs-on: self-hosted
+    runs-on: [self-hosted, node]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
