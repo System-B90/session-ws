@@ -18,7 +18,7 @@ jobs:
     # time, in a package three apps depend on.
     build:
         name: Build + typecheck
-        runs-on: self-hosted
+        runs-on: [self-hosted, node]
         timeout-minutes: 15
 
         steps:
