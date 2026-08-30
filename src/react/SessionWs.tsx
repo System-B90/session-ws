@@ -8,7 +8,7 @@ import {
     useRef,
 } from "react";
 
-import { CoreMessageTypes } from "../protocol.js";
+import { CoreMessageTypes, ticketSubprotocol } from "../protocol.js";
 import { useWebSocketConfig } from "./WebsocketConfigProvider.js";
 
 /**
@@ -27,6 +27,12 @@ const MessageHandlerContext = createContext<MessageHandlerType>(() => {});
 
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 30_000;
+/**
+ * Ceiling on messages held while the socket is CONNECTING. A socket that never
+ * opens (server down, ticket rejected in a loop) would otherwise grow this
+ * queue for as long as the tab stays open; oldest entries are dropped first.
+ */
+const MAX_QUEUED_MESSAGES = 100;
 
 /**
  * Custom hook to establish and manage client-side WebSocket sessions.
@@ -66,9 +72,19 @@ export function useSessionWebSocketContext<T extends string = string>(
     }, []);
 
     const webSocketMessageHandler = useCallback((ev: MessageEvent<any>) => {
-        const parsed = JSON.parse(ev.data);
-        const { type, data, target }: { type: T; data: any; target?: string } =
-            parsed;
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(ev.data);
+        } catch {
+            console.error("[WS] Ignoring malformed frame");
+            return;
+        }
+        if (parsed === null || typeof parsed !== "object") return;
+        const { type, data, target } = parsed as {
+            type: T;
+            data: any;
+            target?: string;
+        };
         messageHandlers.current.forEach((handler) => handler(type, data, target));
     }, []);
 
@@ -101,8 +117,11 @@ export function useSessionWebSocketContext<T extends string = string>(
         }
         if (!isMounted.current) return;
 
+        // The ticket rides as a subprotocol rather than a query parameter so it
+        // never reaches proxy access logs.
         const socket = new WebSocket(
-            `${connectionString}?ticket=${encodeURIComponent(ticket)}`,
+            connectionString,
+            ticketSubprotocol(ticket),
         );
         ws.current = socket;
 
@@ -167,6 +186,9 @@ export function useSessionWebSocketContext<T extends string = string>(
         if (socket && socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify(data));
         } else if (socket && socket.readyState === WebSocket.CONNECTING) {
+            if (messageQueue.current.length >= MAX_QUEUED_MESSAGES) {
+                messageQueue.current.shift();
+            }
             messageQueue.current.push(data);
         } else {
             console.error("WebSocket is closed. Cannot send message.");
