@@ -17,6 +17,18 @@ const PORT = 28477;
 const URL = `ws://127.0.0.1:${PORT}/`;
 const settle = (ms = 200) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Resolves with the socket's close code, or `"never closed"` if it stays open.
+ * Racing against a deadline keeps a missing close a readable assertion failure
+ * instead of a hung test run.
+ */
+function closeCode(socket, timeoutMs = 2000) {
+    return Promise.race([
+        new Promise((resolve) => socket.once("close", resolve)),
+        new Promise((resolve) => setTimeout(() => resolve("never closed"), timeoutMs)),
+    ]);
+}
+
 /** Opens a ticketed socket and resolves once it is OPEN. */
 async function connect(userId, { subprotocol = true } = {}) {
     const ticket = signWsTicket(userId);
@@ -155,11 +167,91 @@ describe("session server hardening", () => {
     describe("rate limiting (#524)", () => {
         it("closes a socket that floods past its budget", async () => {
             const socket = track(await connect("flooder"));
-            const closed = new Promise((resolve) => socket.once("close", resolve));
+            const closed = closeCode(socket);
             for (let i = 0; i < 400; i++) {
                 socket.send(JSON.stringify({ type: "register-session", initiatorKey: "k" }));
             }
             assert.equal(await closed, 1008);
+        });
+
+        it("stays within budget for a normal client", async () => {
+            const socket = track(await connect("polite"));
+            let closed = false;
+            socket.on("close", () => (closed = true));
+            for (let i = 0; i < 20; i++) {
+                socket.send(JSON.stringify({ type: "register-session", initiatorKey: "k" }));
+            }
+            await settle();
+            assert.equal(closed, false);
+        });
+    });
+
+    describe("payload limit (#524)", () => {
+        it("rejects a frame larger than maxPayload instead of buffering it", async () => {
+            const socket = track(await connect("fat-frame"));
+            const closed = closeCode(socket);
+
+            // ws defaults to ~100 MiB; the explicit cap is 64 KiB. A single
+            // oversized frame previously bought an attacker that much memory.
+            socket.send(
+                JSON.stringify({ type: "register-session", initiatorKey: "x".repeat(100_000) }),
+            );
+
+            // 1009 = message too big.
+            assert.equal(await closed, 1009);
+        });
+
+        it("accepts a frame just under the cap", async () => {
+            const socket = track(await connect("slim-frame"));
+            let closed = false;
+            socket.on("close", () => (closed = true));
+            socket.send(
+                JSON.stringify({ type: "register-session", initiatorKey: "x".repeat(1_000) }),
+            );
+            await settle();
+            assert.equal(closed, false);
+        });
+    });
+
+    describe("slow consumers (#524)", () => {
+        it("drops a recipient whose send buffer is over budget", async () => {
+            // A tiny buffered-bytes budget stands in for a consumer that has
+            // stopped draining: without this the fan-out queues into it without
+            // bound, which full-document broadcasts made worse.
+            const strictPort = PORT + 1;
+            const strict = startSessionServer({
+                port: strictPort,
+                host: "127.0.0.1",
+                maxBufferedBytes: 0,
+            });
+            await new Promise((r) => strict.wss.once("listening", r));
+
+            const socket = new WebSocket(
+                `ws://127.0.0.1:${strictPort}/`,
+                ticketSubprotocol(signWsTicket("slow")),
+            );
+            await new Promise((r) => socket.once("open", r));
+            socket.send(JSON.stringify({ type: "register-session", initiatorKey: "k" }));
+            await settle();
+
+            try {
+                const closed = closeCode(socket);
+                // Large enough that bufferedAmount is non-zero when the next
+                // send is considered.
+                for (let i = 0; i < 50; i++) {
+                    strict.dispatchMessageToEveryone("sync-object-update", undefined, {
+                        blob: "y".repeat(20_000),
+                    });
+                }
+
+                // 1013 = try again later.
+                assert.equal(await closed, 1013);
+            } finally {
+                // Must run even when the assertion fails, or the leaked
+                // listener keeps the test runner alive forever.
+                socket.close();
+                strict.close();
+            }
         });
     });
 });
