@@ -198,17 +198,34 @@ export function startSessionServer(
         state.syncObjectIds.add(syncObjectId);
     }
 
+    function unlistenSyncObject(ws: WebSocket, syncObjectId: string) {
+        const listeners = syncObjectListeners.get(syncObjectId);
+        if (!listeners) return;
+        listeners.delete(ws);
+        if (listeners.size === 0) {
+            syncObjectListeners.delete(syncObjectId);
+        }
+    }
+
+    function deregisterSyncObjectListener(ws: WebSocket, syncObjectId: unknown) {
+        if (typeof syncObjectId !== "string") {
+            logError(
+                `deregister-sync-provider ignored: syncObjectId must be a string, got ${typeof syncObjectId}`,
+            );
+            return;
+        }
+        const state = sessions.get(ws);
+        if (!state) return;
+        unlistenSyncObject(ws, syncObjectId);
+        state.syncObjectIds.delete(syncObjectId);
+    }
+
     function removeConnection(ws: WebSocket) {
         const state = sessions.get(ws);
         if (!state) return;
 
         for (const syncObjectId of state.syncObjectIds) {
-            const listeners = syncObjectListeners.get(syncObjectId);
-            if (!listeners) continue;
-            listeners.delete(ws);
-            if (listeners.size === 0) {
-                syncObjectListeners.delete(syncObjectId);
-            }
+            unlistenSyncObject(ws, syncObjectId);
         }
         sessions.delete(ws);
         if (state.initiatorKey) {
@@ -329,6 +346,9 @@ export function startSessionServer(
                 return;
             case CoreMessageTypes.REGISTER_SYNC_PROVIDER:
                 registerSyncObjectListener(ws, data["syncObjectId"]);
+                return;
+            case CoreMessageTypes.DEREGISTER_SYNC_PROVIDER:
+                deregisterSyncObjectListener(ws, data["syncObjectId"]);
                 return;
         }
         const state = sessions.get(ws);
