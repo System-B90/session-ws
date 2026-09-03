@@ -55,6 +55,25 @@ export function useSessionWebSocketContext<T extends string = string>(
     const reconnectAttempt = useRef(0);
     const reconnectTimer = useRef<null | ReturnType<typeof setTimeout>>(null);
     const isMounted = useRef(true);
+    /**
+     * Sync-object subscriptions this client wants, as *desired state* rather
+     * than as frames that were sent once.
+     *
+     * The server keys subscriptions to the socket and drops them when it
+     * closes, so every new socket starts subscribed to nothing. Treating a
+     * subscription as a one-off message therefore loses it on the first
+     * reconnect — and, because `connect()` awaits the ticket fetch before
+     * assigning `ws.current`, a subscription requested during that window was
+     * dropped outright (it is neither OPEN nor CONNECTING, so it did not even
+     * queue). Both cases left the caller believing it was subscribed while the
+     * server never heard of it, and scoped broadcasts silently stopped
+     * arriving until a full page reload.
+     *
+     * Keeping the set and replaying it on every open makes both cases
+     * self-healing: what matters is what the client wants, not whether one
+     * particular send happened to land.
+     */
+    const syncObjectIds = useRef<Set<string>>(new Set());
     // Ref to break the circular dependency: onclose calls connect via ref so it
     // always dispatches the latest closure without ESLint's forward-ref warning.
     const connectRef = useRef<() => void>(() => {});
@@ -99,6 +118,60 @@ export function useSessionWebSocketContext<T extends string = string>(
         );
     }, []);
 
+    /** Re-asserts every wanted subscription on a freshly opened socket. */
+    const replaySyncObjects = useCallback((socket: WebSocket) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+        for (const syncObjectId of syncObjectIds.current) {
+            socket.send(
+                JSON.stringify({
+                    type: CoreMessageTypes.REGISTER_SYNC_PROVIDER,
+                    syncObjectId,
+                }),
+            );
+        }
+    }, []);
+
+    /**
+     * Subscribe to a sync object, now and after every future reconnect.
+     *
+     * Idempotent, and safe to call before the socket exists: the id is
+     * recorded either way and the open handler replays it.
+     */
+    const registerSyncObject = useCallback((syncObjectId: string) => {
+        syncObjectIds.current.add(syncObjectId);
+
+        const socket = ws.current;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(
+                JSON.stringify({
+                    type: CoreMessageTypes.REGISTER_SYNC_PROVIDER,
+                    syncObjectId,
+                }),
+            );
+        }
+        // Not open yet: `onopen` replays the whole set, so there is nothing to
+        // queue and nothing to lose.
+    }, []);
+
+    /** Drop a subscription, so it is not replayed on later reconnects either. */
+    const deregisterSyncObject = useCallback((syncObjectId: string) => {
+        syncObjectIds.current.delete(syncObjectId);
+
+        const socket = ws.current;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(
+                JSON.stringify({
+                    type: CoreMessageTypes.DEREGISTER_SYNC_PROVIDER,
+                    syncObjectId,
+                }),
+            );
+        }
+        // If the socket is gone the server already dropped this socket's
+        // subscriptions; removing it from the set is what keeps it from coming
+        // back on the next reconnect.
+    }, []);
+
     const connect = useCallback(async () => {
         if (!isMounted.current) return;
 
@@ -128,6 +201,10 @@ export function useSessionWebSocketContext<T extends string = string>(
         socket.onopen = () => {
             reconnectAttempt.current = 0;
             registerCurrentSession(socket);
+            // Before the queue: a subscription is a precondition for receiving
+            // anything scoped, and the server drops this socket's
+            // subscriptions the moment it closes.
+            replaySyncObjects(socket);
             while (messageQueue.current.length > 0) {
                 const msg = messageQueue.current.shift();
                 if (msg) socket.send(JSON.stringify(msg));
@@ -159,6 +236,7 @@ export function useSessionWebSocketContext<T extends string = string>(
         ticketEndpoint,
         webSocketMessageHandler,
         registerCurrentSession,
+        replaySyncObjects,
     ]);
 
     useEffect(() => {
@@ -195,7 +273,13 @@ export function useSessionWebSocketContext<T extends string = string>(
         }
     }, []);
 
-    return { ws, addMessageHandler, sendMessage };
+    return {
+        ws,
+        addMessageHandler,
+        sendMessage,
+        registerSyncObject,
+        deregisterSyncObject,
+    };
 }
 
 export const useMessageHandler = () => {
