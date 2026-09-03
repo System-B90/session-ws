@@ -45,6 +45,7 @@ async function connect(userId, { subprotocol = true } = {}) {
 describe("session server hardening", () => {
     let server;
     const sockets = [];
+    const onClientMessageCalls = [];
 
     before(async () => {
         server = startSessionServer({
@@ -53,6 +54,11 @@ describe("session server hardening", () => {
             // Only user "owner" may subscribe to sync objects, so the deny path
             // and the allow path are both exercised.
             canListenToSyncObject: ({ userId }) => userId === "owner",
+            validMessageTypes: ["app-custom-type"],
+            onClientMessage: (ws, data, dispatch, identity) => {
+                onClientMessageCalls.push({ data, identity });
+                return true;
+            },
         });
         await new Promise((r) => server.wss.once("listening", r));
     });
@@ -252,6 +258,155 @@ describe("session server hardening", () => {
                 socket.close();
                 strict.close();
             }
+        });
+    });
+
+    describe("message protocol handling (#5)", () => {
+        it("drops frames with an unknown type", async () => {
+            const socket = track(await connect("user-1"));
+            let received = false;
+            socket.on("message", () => (received = true));
+            socket.send(JSON.stringify({ type: "totally-unknown-type" }));
+            await settle();
+            assert.equal(received, false);
+            assert.equal(socket.readyState, WebSocket.OPEN);
+        });
+
+        it("routes app-supplied validMessageTypes to onClientMessage with the ticket identity", async () => {
+            onClientMessageCalls.length = 0;
+            const socket = track(await connect("user-app-hook"));
+            socket.send(
+                JSON.stringify({ type: "app-custom-type", payload: "hello" }),
+            );
+            await settle();
+            assert.equal(onClientMessageCalls.length, 1);
+            assert.equal(onClientMessageCalls[0].data.type, "app-custom-type");
+            assert.equal(onClientMessageCalls[0].data.payload, "hello");
+            assert.equal(onClientMessageCalls[0].identity.userId, "user-app-hook");
+        });
+
+        it("registers the session before dispatching to onClientMessage, gating broadcast eligibility", async () => {
+            const socket = track(await connect("user-gate"));
+            let received = false;
+            socket.on("message", () => (received = true));
+
+            // Not registered yet: dispatchMessageToEveryone must skip it.
+            server.dispatchMessageToEveryone("sync-object-update", undefined, { x: 1 });
+            await settle();
+            assert.equal(received, false);
+
+            socket.send(JSON.stringify({ type: "register-session", initiatorKey: "gate-key" }));
+            await settle();
+
+            server.dispatchMessageToEveryone("sync-object-update", undefined, { x: 1 });
+            await settle();
+            assert.equal(received, true);
+        });
+    });
+
+    describe("server-originated messages (#5)", () => {
+        it("rejects a server frame with a missing authKey and dispatches nothing", async () => {
+            const socket = track(await connect("user-1"));
+            socket.send(JSON.stringify({ type: "register-session", initiatorKey: "auth-missing" }));
+            await settle();
+
+            let received = false;
+            socket.on("message", () => (received = true));
+            const raw = JSON.stringify({
+                sender: "server",
+                type: "sync-object-update",
+                data: { x: 1 },
+            });
+            for (const client of server.wss.clients) client.emit("message", Buffer.from(raw));
+            await settle();
+            assert.equal(received, false);
+        });
+
+        it("rejects a server frame with a wrong authKey and dispatches nothing", async () => {
+            const socket = track(await connect("user-wrong-key"));
+            socket.send(JSON.stringify({ type: "register-session", initiatorKey: "wrong-key" }));
+            await settle();
+
+            let received = false;
+            socket.on("message", () => (received = true));
+            const raw = JSON.stringify({
+                sender: "server",
+                type: "sync-object-update",
+                authKey: "not-the-real-key",
+                data: { x: 1 },
+            });
+            for (const client of server.wss.clients) client.emit("message", Buffer.from(raw));
+            await settle();
+            assert.equal(received, false);
+        });
+
+        it("dispatches to everyone with the correct authKey and strips it from the forwarded frame", async () => {
+            const socket = track(await connect("user-correct-key"));
+            socket.send(JSON.stringify({ type: "register-session", initiatorKey: "correct-key" }));
+            await settle();
+
+            const delivered = new Promise((resolve) =>
+                socket.once("message", (raw) => resolve(JSON.parse(raw.toString()))),
+            );
+            const raw = JSON.stringify({
+                sender: "server",
+                type: "sync-object-update",
+                authKey: getWsAuthKey(),
+                data: { x: 1 },
+            });
+            for (const client of server.wss.clients) client.emit("message", Buffer.from(raw));
+            const message = await delivered;
+            assert.equal(message.type, "sync-object-update");
+            assert.deepEqual(message.data, { x: 1 });
+            assert.equal("authKey" in message, false);
+        });
+    });
+
+    describe("error paths (#5)", () => {
+        it("does not throw dispatching to a sync object with no listeners", () => {
+            assert.doesNotThrow(() =>
+                server.dispatchToSyncObjectListeners("sync-object-update", "nobody-listening", {
+                    x: 1,
+                }),
+            );
+        });
+
+        it("cleans up both registries on disconnect", async () => {
+            const socket = await connect("owner");
+            socket.send(JSON.stringify({ type: "register-session", initiatorKey: "cleanup-key" }));
+            socket.send(
+                JSON.stringify({ type: "register-sync-provider", syncObjectId: "cleanup-obj" }),
+            );
+            await settle();
+
+            const closed = closeCode(socket);
+            socket.close();
+            await closed;
+            await settle();
+
+            // No listener left for the object; dispatch is a documented no-op,
+            // not a throw against a stale registry entry.
+            assert.doesNotThrow(() =>
+                server.dispatchToSyncObjectListeners("sync-object-update", "cleanup-obj", {}),
+            );
+        });
+    });
+
+    describe("shutdown", () => {
+        it("close() closes all live sessions with 1001 and clears the heartbeat timer", async () => {
+            const closePort = PORT + 2;
+            const closeServer = startSessionServer({ port: closePort, host: "127.0.0.1" });
+            await new Promise((r) => closeServer.wss.once("listening", r));
+
+            const socket = new WebSocket(
+                `ws://127.0.0.1:${closePort}/`,
+                ticketSubprotocol(signWsTicket("shutdown-user")),
+            );
+            await new Promise((r) => socket.once("open", r));
+
+            const closed = closeCode(socket);
+            closeServer.close();
+            assert.equal(await closed, 1001);
         });
     });
 });
