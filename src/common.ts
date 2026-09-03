@@ -5,7 +5,7 @@
  * Canonical source: Bluz `session-server/session-common.ts`.
  */
 
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHmac, hkdfSync, timingSafeEqual } from "crypto";
 
 export * from "./protocol.js";
 
@@ -34,7 +34,7 @@ export const NEXT_PUBLIC_WEBSOCKET_SESSION_SERVER_CONN_STRING = `${WEBSOCKET_PRO
 // Lazy: evaluated per-use (not at import time) so unrelated code that pulls
 // in this module — e.g. tests, or Next.js routes that never touch WS auth —
 // doesn't fail just because the env var isn't set in that context.
-export function getWsAuthKey(): string {
+function getWsRootSecret(): string {
     const key = process.env.WEBSOCKET_SESSION_SERVER_SENDER_AUTH_KEY;
     if (!key) {
         throw new Error(
@@ -42,6 +42,69 @@ export function getWsAuthKey(): string {
         );
     }
     return key;
+}
+
+/**
+ * The value server processes put in the `authKey` field of broadcast frames.
+ * This is the derived sender subkey, not the raw env secret — see the HKDF
+ * note below.
+ */
+export function getWsAuthKey(): string {
+    return getWsSenderAuthKey();
+}
+
+/*
+ * The configured env secret is never used directly on the wire. Two independent
+ * subkeys are derived from it with HKDF-SHA256 under distinct `info` labels, so
+ * the value that server processes send in cleartext per broadcast (the sender
+ * key) cannot be replayed against the ticket HMAC, and vice versa. Rotating the
+ * root secret rotates both.
+ */
+const SENDER_KEY_INFO = "system-b90/session-ws/sender-auth-key/v1";
+const TICKET_KEY_INFO = "system-b90/session-ws/ticket-hmac-key/v1";
+const SUBKEY_BYTES = 32;
+
+function deriveSubkey(info: string): Buffer {
+    return Buffer.from(
+        hkdfSync("sha256", getWsRootSecret(), Buffer.alloc(0), info, SUBKEY_BYTES),
+    );
+}
+
+// Derivation is pure but not free; memoize per root secret so a rotated env var
+// (as tests do) still takes effect.
+let subkeyCache: null | { root: string; sender: Buffer; ticket: Buffer } = null;
+
+function subkeys() {
+    const root = getWsRootSecret();
+    if (!subkeyCache || subkeyCache.root !== root) {
+        subkeyCache = {
+            root,
+            sender: deriveSubkey(SENDER_KEY_INFO),
+            ticket: deriveSubkey(TICKET_KEY_INFO),
+        };
+    }
+    return subkeyCache;
+}
+
+/** Key server processes present in the `authKey` field of broadcast frames. */
+export function getWsSenderAuthKey(): string {
+    return subkeys().sender.toString("hex");
+}
+
+/** Key used to sign and verify connect tickets. Never sent on the wire. */
+export function getWsTicketKey(): Buffer {
+    return subkeys().ticket;
+}
+
+/**
+ * Length-independent constant-time string compare. Both sides are hashed first
+ * so the comparison buffers are always 32 bytes, which keeps `timingSafeEqual`
+ * from throwing (and from leaking length) on attacker-controlled input.
+ */
+export function secureCompare(a: string, b: string): boolean {
+    const digest = (value: string) =>
+        createHmac("sha256", "session-ws/compare").update(value).digest();
+    return timingSafeEqual(digest(a), digest(b));
 }
 
 const WS_TICKET_TTL_MS = 30_000;
@@ -55,7 +118,7 @@ const WS_TICKET_TTL_MS = 30_000;
 export function signWsTicket(userId: string): string {
     const expiresAt = Date.now() + WS_TICKET_TTL_MS;
     const payload = `${userId}.${expiresAt}`;
-    const signature = createHmac("sha256", getWsAuthKey())
+    const signature = createHmac("sha256", getWsTicketKey())
         .update(payload)
         .digest("hex");
     return `${payload}.${signature}`;
@@ -70,12 +133,10 @@ export function verifyWsTicket(ticket: string): null | string {
         return null;
     }
 
-    const expectedSignature = createHmac("sha256", getWsAuthKey())
+    const expectedSignature = createHmac("sha256", getWsTicketKey())
         .update(`${userId}.${expiresAtRaw}`)
         .digest("hex");
-    const expected = Buffer.from(expectedSignature, "hex");
-    const actual = Buffer.from(signature, "hex");
-    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+    if (!secureCompare(expectedSignature, signature)) {
         return null;
     }
 
