@@ -115,30 +115,82 @@ const WS_TICKET_TTL_MS = 30_000;
  * instead of trusting a client-supplied random UUID. Cheap HMAC compare, not
  * a static shared secret sent per-message, keeps the connect path fast.
  */
-export function signWsTicket(userId: string): string {
+/**
+ * The authenticated bearer of a ticket.
+ *
+ * `scope` is the app's own privilege label — "staff"/"student", "admin"/
+ * "viewer", a tenant id, whatever the app tiers on. The core never interprets
+ * it; it only guarantees it was signed by the app's own key and so cannot be
+ * chosen by the browser presenting the ticket. Apps that serve a single
+ * privilege level can ignore it entirely.
+ */
+export type WsTicketIdentity = {
+    userId: string;
+    scope?: string;
+};
+
+/*
+ * Ticket wire format. A ticket is dot-separated, so neither the user id nor
+ * the scope may contain a dot:
+ *   legacy  `userId.expiresAt.signature`               (3 parts, no scope)
+ *   scoped  `userId.expiresAt.scope.signature`         (4 parts)
+ * Legacy tickets stay valid, so a server can be upgraded before its clients.
+ */
+const TICKET_FIELD_PATTERN = /^[^.]+$/;
+
+export function signWsTicket(userId: string, scope?: string): string {
+    if (!TICKET_FIELD_PATTERN.test(userId)) {
+        throw new Error("signWsTicket: userId must not contain a dot");
+    }
+    if (scope !== undefined && !TICKET_FIELD_PATTERN.test(scope)) {
+        throw new Error("signWsTicket: scope must be non-empty and dot-free");
+    }
     const expiresAt = Date.now() + WS_TICKET_TTL_MS;
-    const payload = `${userId}.${expiresAt}`;
+    // The scope is inside the signed payload, not appended after it: a scope
+    // the holder could edit would make the whole gate decorative.
+    const payload =
+        scope === undefined
+            ? `${userId}.${expiresAt}`
+            : `${userId}.${expiresAt}.${scope}`;
     const signature = createHmac("sha256", getWsTicketKey())
         .update(payload)
         .digest("hex");
     return `${payload}.${signature}`;
 }
 
-export function verifyWsTicket(ticket: string): null | string {
+/**
+ * Verifies a ticket and returns its full identity, or null when it is
+ * malformed, expired, or not signed by this key.
+ */
+export function verifyWsTicketIdentity(
+    ticket: string,
+): null | WsTicketIdentity {
     const parts = ticket.split(".");
-    if (parts.length !== 3) return null;
-    const [userId, expiresAtRaw, signature] = parts;
+    if (parts.length !== 3 && parts.length !== 4) return null;
+
+    const signature = parts[parts.length - 1]!;
+    const [userId, expiresAtRaw] = parts;
+    const scope = parts.length === 4 ? parts[2] : undefined;
     const expiresAt = Number(expiresAtRaw);
     if (!userId || !Number.isFinite(expiresAt) || Date.now() > expiresAt) {
         return null;
     }
 
+    const payload = parts.slice(0, parts.length - 1).join(".");
     const expectedSignature = createHmac("sha256", getWsTicketKey())
-        .update(`${userId}.${expiresAtRaw}`)
+        .update(payload)
         .digest("hex");
     if (!secureCompare(expectedSignature, signature)) {
         return null;
     }
 
-    return userId;
+    return scope === undefined ? { userId } : { scope, userId };
+}
+
+/**
+ * Verifies a ticket and returns just the user id. Kept for callers that do not
+ * tier on scope; {@link verifyWsTicketIdentity} is the full form.
+ */
+export function verifyWsTicket(ticket: string): null | string {
+    return verifyWsTicketIdentity(ticket)?.userId ?? null;
 }
