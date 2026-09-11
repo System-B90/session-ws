@@ -78,7 +78,12 @@ describe("session server hardening", () => {
         it("round-trips a ticket and rejects a tampered signature", () => {
             const ticket = signWsTicket("user-1");
             assert.equal(verifyWsTicket(ticket), "user-1");
-            assert.equal(verifyWsTicket(`${ticket.slice(0, -1)}0`), null);
+            const lastChar = ticket.at(-1);
+            const flippedChar = lastChar === "0" ? "1" : "0";
+            assert.equal(
+                verifyWsTicket(`${ticket.slice(0, -1)}${flippedChar}`),
+                null,
+            );
         });
 
         it("does not accept the sender key as a ticket", () => {
