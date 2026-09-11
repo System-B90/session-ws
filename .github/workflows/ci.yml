@@ -44,3 +44,9 @@ jobs:
             # writing, so a stale dist/ can't mask a type error.
             - name: Typecheck
               run: npx tsc -p tsconfig.json --noEmit
+
+            # Tests run against dist/ (`npm test` builds first), so a
+            # regression in this package fails here instead of surfacing in
+            # bluz or madash after publish.
+            - name: Test
+              run: npm test

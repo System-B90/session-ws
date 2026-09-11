@@ -19,6 +19,19 @@ import { startSessionServer } from "@system-b90/session-ws/server";
 startSessionServer({ validMessageTypes: Object.values(MyMessageTypes) });
 ```
 
+## Testing
+
+Tests run against the built `dist/` output (the published surface) with Node's
+built-in test runner:
+
+```powershell
+npm test              # builds, then runs tests/*.test.mjs
+npm run test:coverage # same, with a coverage report
+```
+
+Test files live under `tests/`, one per source module (`common.test.mjs`,
+`server.test.mjs`, `react-hook.test.mjs`), not colocated with `src/`, since
+they import from `dist/` rather than `src/`.
 ## Mixed-privilege apps (staff/student, admin/viewer, per-tenant)
 
 When not every socket may see everything, two pieces work together.
