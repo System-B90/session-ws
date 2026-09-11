@@ -12,7 +12,7 @@ import {
     getWsAuthKey,
     secureCompare,
     TICKET_SUBPROTOCOL_PREFIX,
-    verifyWsTicket,
+    verifyWsTicketIdentity,
     WEBSOCKET_SESSION_SERVER_SENDER_SERVER_MAGIC,
 } from "./common.js";
 
@@ -22,6 +22,8 @@ interface SessionState {
     initiatorKey?: string;
     /** Authenticated user id resolved from the connect-time ticket. */
     userId: string;
+    /** Signed privilege label from the ticket, when the app issues scoped ones. */
+    scope?: string;
     isAlive: boolean;
     /** Sync-object ids this socket listens to (for O(1) cleanup on close). */
     syncObjectIds: Set<string>;
@@ -49,6 +51,13 @@ export interface SessionServerDispatch {
 export interface ClientIdentity {
     /** User id validated from the connect ticket. Never client-supplied. */
     userId: string;
+    /**
+     * Privilege label carried in the connect ticket, when the app signs scoped
+     * tickets (see `signWsTicket`). Undefined for unscoped tickets. Like
+     * `userId` it is signed, so it is safe to gate on; the core assigns it no
+     * meaning of its own.
+     */
+    scope?: string;
 }
 
 export interface SessionServerOptions {
@@ -79,6 +88,18 @@ export interface SessionServerOptions {
      * are always included). Frames with unknown types are dropped.
      */
     validMessageTypes?: Iterable<string>;
+    /**
+     * Gate for `register-session`. A registered session receives every
+     * *untargeted* broadcast, so in an app where sockets do not all hold the
+     * same read rights this is a privilege, not bookkeeping — and the core
+     * handles the frame itself, leaving `onClientMessage` no chance to refuse
+     * it. Apps that serve mixed-privilege sockets must supply this.
+     *
+     * Defaults to allow, preserving the behaviour of every existing consumer.
+     * A denied socket stays connected and may still listen to sync objects;
+     * it is simply excluded from the everyone-fan-out.
+     */
+    canRegisterSession?: (identity: ClientIdentity) => boolean;
     /**
      * Ownership gate for `register-sync-provider`. Without it any authenticated
      * socket can subscribe to any sync-object id and receive its traffic, so the
@@ -159,6 +180,13 @@ export function startSessionServer(
         ...(options.validMessageTypes ?? []),
     ]);
 
+    /** The signed identity of a socket, as handed to every app gate. */
+    function identityOf(state: SessionState): ClientIdentity {
+        return state.scope === undefined
+            ? { userId: state.userId }
+            : { scope: state.scope, userId: state.userId };
+    }
+
     function registerSession(ws: WebSocket, initiatorKey: unknown) {
         if (typeof initiatorKey !== "string") {
             logError(
@@ -167,9 +195,14 @@ export function startSessionServer(
             return;
         }
         const state = sessions.get(ws);
-        if (state) {
-            state.initiatorKey = initiatorKey;
+        if (!state) return;
+        // Allow by default: most apps have one privilege level, and every
+        // socket reaching here already passed ticket auth.
+        if (options.canRegisterSession?.(identityOf(state)) === false) {
+            logError(`register-session denied for user ${state.userId}`);
+            return;
         }
+        state.initiatorKey = initiatorKey;
     }
 
     function registerSyncObjectListener(ws: WebSocket, syncObjectId: unknown) {
@@ -183,7 +216,7 @@ export function startSessionServer(
         if (!state) return;
         // Deny by default: an unauthorized subscription is a read primitive on
         // another tenant's sync traffic.
-        if (!options.canListenToSyncObject?.({ userId: state.userId }, syncObjectId)) {
+        if (!options.canListenToSyncObject?.(identityOf(state), syncObjectId)) {
             logError(
                 `register-sync-provider denied for user ${state.userId} on "${syncObjectId}"`,
             );
@@ -198,17 +231,34 @@ export function startSessionServer(
         state.syncObjectIds.add(syncObjectId);
     }
 
+    function unlistenSyncObject(ws: WebSocket, syncObjectId: string) {
+        const listeners = syncObjectListeners.get(syncObjectId);
+        if (!listeners) return;
+        listeners.delete(ws);
+        if (listeners.size === 0) {
+            syncObjectListeners.delete(syncObjectId);
+        }
+    }
+
+    function deregisterSyncObjectListener(ws: WebSocket, syncObjectId: unknown) {
+        if (typeof syncObjectId !== "string") {
+            logError(
+                `deregister-sync-provider ignored: syncObjectId must be a string, got ${typeof syncObjectId}`,
+            );
+            return;
+        }
+        const state = sessions.get(ws);
+        if (!state) return;
+        unlistenSyncObject(ws, syncObjectId);
+        state.syncObjectIds.delete(syncObjectId);
+    }
+
     function removeConnection(ws: WebSocket) {
         const state = sessions.get(ws);
         if (!state) return;
 
         for (const syncObjectId of state.syncObjectIds) {
-            const listeners = syncObjectListeners.get(syncObjectId);
-            if (!listeners) continue;
-            listeners.delete(ws);
-            if (listeners.size === 0) {
-                syncObjectListeners.delete(syncObjectId);
-            }
+            unlistenSyncObject(ws, syncObjectId);
         }
         sessions.delete(ws);
         if (state.initiatorKey) {
@@ -330,10 +380,13 @@ export function startSessionServer(
             case CoreMessageTypes.REGISTER_SYNC_PROVIDER:
                 registerSyncObjectListener(ws, data["syncObjectId"]);
                 return;
+            case CoreMessageTypes.DEREGISTER_SYNC_PROVIDER:
+                deregisterSyncObjectListener(ws, data["syncObjectId"]);
+                return;
         }
         const state = sessions.get(ws);
         if (!state) return;
-        options.onClientMessage?.(ws, data, dispatch, { userId: state.userId });
+        options.onClientMessage?.(ws, data, dispatch, identityOf(state));
     }
 
     /** True while the socket is within its sliding-window message budget. */
@@ -390,8 +443,8 @@ export function startSessionServer(
         const ticket =
             subprotocolTicket ??
             new URL(req.url ?? "", "http://internal").searchParams.get("ticket");
-        const userId = ticket ? verifyWsTicket(ticket) : null;
-        if (!userId) {
+        const identity = ticket ? verifyWsTicketIdentity(ticket) : null;
+        if (!identity) {
             logError("Rejected connection: missing or invalid ticket");
             ws.close(1008, "Invalid or missing ticket");
             return;
@@ -399,7 +452,8 @@ export function startSessionServer(
 
         sessions.set(ws, {
             isAlive: true,
-            userId,
+            userId: identity.userId,
+            scope: identity.scope,
             syncObjectIds: new Set(),
             windowStartedAt: Date.now(),
             messagesInWindow: 0,

@@ -154,6 +154,24 @@ describe("session server hardening", () => {
             assert.deepEqual(message.data, { x: 1 });
         });
 
+        it("stops delivering after deregister-sync-provider (#525)", async () => {
+            const socket = track(await connect("owner"));
+            socket.send(
+                JSON.stringify({ type: "register-sync-provider", syncObjectId: "obj-4" }),
+            );
+            await settle();
+            socket.send(
+                JSON.stringify({ type: "deregister-sync-provider", syncObjectId: "obj-4" }),
+            );
+            await settle();
+
+            let received = false;
+            socket.on("message", () => (received = true));
+            server.dispatchToSyncObjectListeners("sync-object-update", "obj-4", { x: 1 });
+            await settle();
+            assert.equal(received, false);
+        });
+
         it("sends exactly one copy when a subscriber is also a session (#540.6)", async () => {
             const socket = track(await connect("owner"));
             socket.send(JSON.stringify({ type: "register-session", initiatorKey: "k1" }));
