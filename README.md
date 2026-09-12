@@ -91,7 +91,9 @@ connectWindowMs: 60_000,
 
 `singleUseTickets` is off by default because it breaks a client that opens more
 than one socket per minted ticket; the React hook here mints one per connect
-attempt, so it is safe to turn on with it.
+attempt, so it is safe to turn on with it. Every minted ticket carries a nonce,
+so two minted in the same millisecond are still distinct — a repeat really is a
+replay.
 
 Note the asymmetry in the defaults: `canListenToSyncObject` denies by default
 (an unauthorized subscription reads another tenant's traffic), while
