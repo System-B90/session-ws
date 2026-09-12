@@ -269,6 +269,31 @@ describe("connect rate limit", () => {
         assert.equal(await closeCode(overBudget), 1013);
     });
 
+    it("survives an upgrade request with no socket on it", async () => {
+        // Consumers that drive the core over a test double or a custom
+        // transport hand it a bare request object. The budget runs before
+        // everything else on the connect path, so assuming `req.socket` here
+        // took their whole socket handling down.
+        const fake = {
+            protocol: "",
+            readyState: 1,
+            bufferedAmount: 0,
+            on() {},
+            once() {},
+            ping() {},
+            send() {},
+            close() {},
+            terminate() {},
+        };
+        assert.doesNotThrow(() =>
+            server.wss.emit("connection", fake, {
+                url: `/?ticket=${encodeURIComponent(
+                    signWsTicket("no-socket", "staff"),
+                )}`,
+            }),
+        );
+    });
+
     it("spends budget on unticketed connects too", async () => {
         // The point of budgeting before ticket verification: an attacker with
         // no valid ticket must not get unlimited free handshakes.

@@ -519,7 +519,11 @@ export function startSessionServer(
     wss.on("connection", (ws, req) => {
         // Budget first: everything below (ticket HMAC, registry insert) is
         // work an unauthenticated client would otherwise get for free.
-        const remoteAddress = req.socket.remoteAddress ?? "unknown";
+        // `req.socket` is always present on a real `ws` upgrade request, but
+        // not necessarily on a test double or a custom transport — and this
+        // runs before anything else on the connect path, so assuming it took
+        // every such consumer's socket handling down with it.
+        const remoteAddress = req.socket?.remoteAddress ?? "unknown";
         if (!withinConnectBudget(remoteAddress)) {
             logError(`Connect rate limit exceeded for ${remoteAddress}`);
             ws.close(1013, "Connect rate limit exceeded");
