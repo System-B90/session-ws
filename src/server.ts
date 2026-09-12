@@ -110,6 +110,40 @@ export interface SessionServerOptions {
         syncObjectId: string,
     ) => boolean;
     /**
+     * Sync objects that may carry *no payload at all* — every broadcast
+     * targeted at one of these ids is delivered with its `data` stripped.
+     *
+     * For a channel whose listeners are less privileged than the senders (a
+     * student refresh ping, a public "something changed" feed), "we only ever
+     * send an empty frame here" is otherwise an unenforced convention spread
+     * across every call site. One future caller passing a payload alongside
+     * this target — or adding the id to a `targets` array — leaks it to every
+     * subscriber. Declaring the id here moves that invariant to the wire,
+     * where no app-side regression can get past it.
+     */
+    payloadFreeSyncObjects?: Iterable<string>;
+    /**
+     * Reject a ticket that has already been used to open a socket. A ticket is
+     * short-lived but replayable within its TTL, so anyone who observes one
+     * (shared screen, devtools, a proxy that logged the legacy `?ticket=`
+     * form) can open their own socket with the victim's identity and scope
+     * until it expires. With this on, the second use of a ticket is refused.
+     *
+     * Off by default: a client that opens more than one socket per minted
+     * ticket would start failing. Apps that mint a ticket per connect attempt
+     * (the `@system-b90/session-ws/react` hook does) should turn it on.
+     */
+    singleUseTickets?: boolean;
+    /**
+     * Accepted connections per remote address per `connectWindowMs`. Guards
+     * the pre-auth path: without it, ticket verification and the TLS/WS
+     * handshake are free to an unauthenticated attacker, who can hold the
+     * process busy and make brute-force attempts cost nothing. Defaults to 60.
+     */
+    maxConnectsPerWindow?: number;
+    /** Window for the per-address connect budget. Defaults to 60s. */
+    connectWindowMs?: number;
+    /**
      * App hook for client frames the core doesn't handle (anything beyond
      * session/sync registration). Return true when the message was handled;
      * unhandled messages are ignored.
@@ -160,6 +194,47 @@ export function startSessionServer(
     const maxMessagesPerWindow = options.maxMessagesPerWindow ?? 120;
     const rateLimitWindowMs = options.rateLimitWindowMs ?? 10_000;
     const maxBufferedBytes = options.maxBufferedBytes ?? 1024 * 1024;
+    const maxConnectsPerWindow = options.maxConnectsPerWindow ?? 60;
+    const connectWindowMs = options.connectWindowMs ?? 60_000;
+    const payloadFreeSyncObjects = new Set<string>(
+        options.payloadFreeSyncObjects ?? [],
+    );
+
+    /**
+     * Tickets already used to open a socket, by signature → expiry. Only
+     * populated when `singleUseTickets` is on. Entries are evicted once the
+     * ticket would have expired anyway, so the map stays bounded by the ticket
+     * TTL times the connect rate — which the per-address budget below caps.
+     */
+    const spentTickets = new Map<string, number>();
+    /** Accepted connects per remote address, as a sliding window. */
+    const connectBudget = new Map<
+        string,
+        { windowStartedAt: number; connects: number }
+    >();
+
+    function sweepExpired(now: number) {
+        for (const [signature, expiresAt] of spentTickets) {
+            if (expiresAt <= now) spentTickets.delete(signature);
+        }
+        for (const [address, budget] of connectBudget) {
+            if (now - budget.windowStartedAt >= connectWindowMs) {
+                connectBudget.delete(address);
+            }
+        }
+    }
+
+    /** True while this address is within its sliding-window connect budget. */
+    function withinConnectBudget(address: string): boolean {
+        const now = Date.now();
+        const budget = connectBudget.get(address);
+        if (!budget || now - budget.windowStartedAt >= connectWindowMs) {
+            connectBudget.set(address, { windowStartedAt: now, connects: 1 });
+            return true;
+        }
+        budget.connects += 1;
+        return budget.connects <= maxConnectsPerWindow;
+    }
 
     /**
      * In-memory connection registry.
@@ -334,7 +409,14 @@ export function startSessionServer(
             );
             return;
         }
-        const message = buildMessage(messageType, syncObjectId, data);
+        // Enforced here rather than at the call sites: this is the only path
+        // by which anything reaches a sync object's listeners, so a payload
+        // cannot arrive on a payload-free channel by any route.
+        const message = buildMessage(
+            messageType,
+            syncObjectId,
+            payloadFreeSyncObjects.has(syncObjectId) ? undefined : data,
+        );
         for (const ws of listeners) {
             safeSend(ws, message, `${messageType} to sync object ${syncObjectId}`);
         }
@@ -435,6 +517,15 @@ export function startSessionServer(
     );
 
     wss.on("connection", (ws, req) => {
+        // Budget first: everything below (ticket HMAC, registry insert) is
+        // work an unauthenticated client would otherwise get for free.
+        const remoteAddress = req.socket.remoteAddress ?? "unknown";
+        if (!withinConnectBudget(remoteAddress)) {
+            logError(`Connect rate limit exceeded for ${remoteAddress}`);
+            ws.close(1013, "Connect rate limit exceeded");
+            return;
+        }
+
         // Preferred: ticket as a WebSocket subprotocol, so it never lands in
         // access logs. Query string stays supported for older clients.
         const subprotocolTicket = ws.protocol?.startsWith(TICKET_SUBPROTOCOL_PREFIX)
@@ -448,6 +539,23 @@ export function startSessionServer(
             logError("Rejected connection: missing or invalid ticket");
             ws.close(1008, "Invalid or missing ticket");
             return;
+        }
+
+        if (options.singleUseTickets) {
+            const now = Date.now();
+            sweepExpired(now);
+            if (spentTickets.has(identity.signature)) {
+                // Someone is presenting a ticket that already opened a socket.
+                // The legitimate holder mints a new one per attempt, so this is
+                // a replay — refuse it rather than hand out a second socket
+                // carrying the victim's scope.
+                logError(
+                    `Rejected connection: ticket already used (user ${identity.userId})`,
+                );
+                ws.close(1008, "Ticket already used");
+                return;
+            }
+            spentTickets.set(identity.signature, identity.expiresAt);
         }
 
         sessions.set(ws, {

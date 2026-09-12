@@ -44,16 +44,22 @@ function collect(socket) {
 
 describe("scoped tickets", () => {
     it("round-trips a scope", () => {
-        const ticket = signWsTicket("u1", "staff");
-        assert.deepEqual(verifyWsTicketIdentity(ticket), {
-            scope: "staff",
-            userId: "u1",
-        });
+        const identity = verifyWsTicketIdentity(signWsTicket("u1", "staff"));
+        assert.equal(identity.userId, "u1");
+        assert.equal(identity.scope, "staff");
     });
 
     it("still accepts an unscoped ticket, reporting no scope", () => {
         const identity = verifyWsTicketIdentity(signWsTicket("u1"));
-        assert.deepEqual(identity, { userId: "u1" });
+        assert.equal(identity.userId, "u1");
+        assert.equal(identity.scope, undefined);
+    });
+
+    it("reports the ticket expiry and signature for replay defence", () => {
+        const ticket = signWsTicket("u1", "staff");
+        const identity = verifyWsTicketIdentity(ticket);
+        assert.equal(identity.signature, ticket.split(".").at(-1));
+        assert.ok(identity.expiresAt > Date.now());
     });
 
     it("keeps verifyWsTicket working for callers that ignore scope", () => {
