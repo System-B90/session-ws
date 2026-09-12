@@ -5,7 +5,7 @@
  * Canonical source: Bluz `session-server/session-common.ts`.
  */
 
-import { createHmac, hkdfSync, timingSafeEqual } from "crypto";
+import { createHmac, hkdfSync, randomBytes, timingSafeEqual } from "crypto";
 
 export * from "./protocol.js";
 
@@ -142,13 +142,16 @@ export type WsTicketIdentity = {
 };
 
 /*
- * Ticket wire format. A ticket is dot-separated, so neither the user id nor
- * the scope may contain a dot:
- *   legacy  `userId.expiresAt.signature`               (3 parts, no scope)
- *   scoped  `userId.expiresAt.scope.signature`         (4 parts)
- * Legacy tickets stay valid, so a server can be upgraded before its clients.
+ * Ticket wire format. A ticket is dot-separated, so no field may contain a dot:
+ *   legacy  `userId.expiresAt.signature`                    (3 parts, no scope)
+ *   scoped  `userId.expiresAt.scope.signature`              (4 parts)
+ *   current `userId.expiresAt.scope.nonce.signature`        (5 parts)
+ * Both older forms stay valid, so a server can be upgraded before its clients.
+ * In the current form an empty `scope` field means "no scope", which keeps the
+ * field count fixed whether or not the app tiers on privilege.
  */
 const TICKET_FIELD_PATTERN = /^[^.]+$/;
+const TICKET_NONCE_BYTES = 12;
 
 export function signWsTicket(userId: string, scope?: string): string {
     if (!TICKET_FIELD_PATTERN.test(userId)) {
@@ -158,12 +161,19 @@ export function signWsTicket(userId: string, scope?: string): string {
         throw new Error("signWsTicket: scope must be non-empty and dot-free");
     }
     const expiresAt = Date.now() + WS_TICKET_TTL_MS;
-    // The scope is inside the signed payload, not appended after it: a scope
-    // the holder could edit would make the whole gate decorative.
-    const payload =
-        scope === undefined
-            ? `${userId}.${expiresAt}`
-            : `${userId}.${expiresAt}.${scope}`;
+    /*
+     * Without this, a ticket is a pure function of (userId, scope, expiry in
+     * ms) — so two tickets minted for the same user in the same millisecond
+     * are byte-identical. That is fine for verification and fatal for any
+     * single-use check: two tabs (or a reconnecting sender) that ask at the
+     * same moment produce one ticket, and the second socket is refused as a
+     * replay of the first. The nonce makes every minted ticket distinct, which
+     * is what lets a server treat a repeat as genuinely a replay.
+     */
+    const nonce = randomBytes(TICKET_NONCE_BYTES).toString("hex");
+    // Scope and nonce are inside the signed payload, not appended after it: a
+    // scope the holder could edit would make the whole gate decorative.
+    const payload = `${userId}.${expiresAt}.${scope ?? ""}.${nonce}`;
     const signature = createHmac("sha256", getWsTicketKey())
         .update(payload)
         .digest("hex");
@@ -178,11 +188,14 @@ export function verifyWsTicketIdentity(
     ticket: string,
 ): null | WsTicketIdentity {
     const parts = ticket.split(".");
-    if (parts.length !== 3 && parts.length !== 4) return null;
+    if (parts.length < 3 || parts.length > 5) return null;
 
     const signature = parts[parts.length - 1]!;
     const [userId, expiresAtRaw] = parts;
-    const scope = parts.length === 4 ? parts[2] : undefined;
+    // 3 parts carry no scope; 4 and 5 both carry it in the same slot, and in
+    // the 5-part form an empty string there means the app signed no scope.
+    const rawScope = parts.length === 3 ? undefined : parts[2];
+    const scope = rawScope ? rawScope : undefined;
     const expiresAt = Number(expiresAtRaw);
     if (!userId || !Number.isFinite(expiresAt) || Date.now() > expiresAt) {
         return null;

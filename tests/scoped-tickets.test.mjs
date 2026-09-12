@@ -55,6 +55,33 @@ describe("scoped tickets", () => {
         assert.equal(identity.scope, undefined);
     });
 
+    it("mints a distinct ticket even twice in the same millisecond", () => {
+        // A ticket used to be a pure function of (userId, scope, expiry in ms),
+        // so two minted in the same tick were byte-identical — which makes any
+        // single-use check refuse the legitimate second socket (two tabs, or a
+        // reconnecting sender) as if it were a replay.
+        const tickets = new Set();
+        for (let i = 0; i < 50; i += 1) {
+            tickets.add(signWsTicket("u1", "staff"));
+        }
+        assert.equal(tickets.size, 50);
+
+        // …and every one of them still verifies to the same identity.
+        for (const ticket of tickets) {
+            const identity = verifyWsTicketIdentity(ticket);
+            assert.equal(identity.userId, "u1");
+            assert.equal(identity.scope, "staff");
+        }
+    });
+
+    it("round-trips an unscoped ticket through the current 5-part form", () => {
+        // The empty scope field keeps the field count fixed; it must read back
+        // as "no scope", not as a scope named "".
+        const identity = verifyWsTicketIdentity(signWsTicket("u1"));
+        assert.equal(identity.scope, undefined);
+        assert.equal(identity.userId, "u1");
+    });
+
     it("reports the ticket expiry and signature for replay defence", () => {
         const ticket = signWsTicket("u1", "staff");
         const identity = verifyWsTicketIdentity(ticket);
