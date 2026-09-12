@@ -127,6 +127,18 @@ const WS_TICKET_TTL_MS = 30_000;
 export type WsTicketIdentity = {
     userId: string;
     scope?: string;
+    /**
+     * Epoch ms this ticket stops being valid. Exposed so a server can key a
+     * single-use replay cache on the ticket and evict the entry exactly when
+     * the ticket would have expired anyway.
+     */
+    expiresAt: number;
+    /**
+     * The ticket's HMAC signature — a collision-resistant identifier for
+     * *this* ticket, safe to use as a replay-cache key. It is not a secret the
+     * holder doesn't already have.
+     */
+    signature: string;
 };
 
 /*
@@ -184,7 +196,9 @@ export function verifyWsTicketIdentity(
         return null;
     }
 
-    return scope === undefined ? { userId } : { scope, userId };
+    return scope === undefined
+        ? { expiresAt, signature, userId }
+        : { expiresAt, scope, signature, userId };
 }
 
 /**

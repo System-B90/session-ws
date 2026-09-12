@@ -66,6 +66,33 @@ A denied socket stays connected and may still listen to sync objects it is
 allowed; it is only excluded from the everyone-fan-out. `canRegisterSession`
 defaults to allow, so single-privilege apps need no change.
 
+**Declare the channels that may carry no payload.** A low-privilege channel is
+usually meant to carry nothing but a "something changed, refetch" ping, so the
+listener re-reads through an endpoint that applies the real projection. Keeping
+that to a convention means one future call site passing data alongside the
+target leaks it. Name the id instead, and the core strips `data` from every
+broadcast that reaches it — through `dispatchToSyncObjectListeners`, through a
+`targets` array, and through a server-sender frame alike:
+
+```ts
+payloadFreeSyncObjects: ["students"],
+```
+
+**Turn on single-use tickets and a connect budget for a hostile client.** A
+ticket is short-lived but replayable within its TTL, so anyone who observes one
+can open their own socket with the victim's scope until it expires; and without
+a budget the pre-auth handshake is free work for an unauthenticated attacker:
+
+```ts
+singleUseTickets: true,        // second use of a ticket is refused (1008)
+maxConnectsPerWindow: 60,      // per remote address, default
+connectWindowMs: 60_000,
+```
+
+`singleUseTickets` is off by default because it breaks a client that opens more
+than one socket per minted ticket; the React hook here mints one per connect
+attempt, so it is safe to turn on with it.
+
 Note the asymmetry in the defaults: `canListenToSyncObject` denies by default
 (an unauthorized subscription reads another tenant's traffic), while
 `canRegisterSession` allows by default (most apps have one privilege level, and
