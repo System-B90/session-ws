@@ -1,6 +1,6 @@
 {
     "name": "@system-b90/session-ws",
-    "version": "0.6.0",
+    "version": "0.6.1",
     "description": "Shared WebSocket session server core, HMAC ticket auth, and React client hooks for System-B90 apps",
     "license": "UNLICENSED",
     "repository": {
