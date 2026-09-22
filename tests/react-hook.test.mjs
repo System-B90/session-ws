@@ -75,6 +75,11 @@ class MockWebSocket {
         this.onmessage?.({ data: JSON.stringify(payload) });
     }
 
+    /** Test helper: fire onmessage with an exact, unserialised `data` value. */
+    triggerRawMessage(data) {
+        this.onmessage?.({ data });
+    }
+
     triggerError() {
         this.onerror?.();
     }
@@ -257,6 +262,66 @@ describe("useSessionWebSocketContext", () => {
 
         assert.equal(calls.length, 1);
         assert.deepEqual(calls[0], { type: "sync-object-update", data: { x: 1 }, target: "obj-1" });
+
+        unmount();
+    });
+
+    it("survives a malformed inbound frame and keeps serving later ones", async () => {
+        // #6 filed this as an unguarded JSON.parse that would throw inside the
+        // handler. The guard is in place now; this pins it so the crash cannot
+        // come back — a single bad server frame must not take the socket down.
+        globalThis.fetch = mock.fn(async () => jsonResponse({ ticket: "tix" }));
+        const { result, unmount } = renderHook(() => useSessionWebSocketContext(), { wrapper });
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        const socket = MockWebSocket.instances[0];
+        act(() => socket.triggerOpen());
+
+        const calls = [];
+        act(() => {
+            result.current.addMessageHandler((type) => calls.push(type));
+        });
+
+        const consoleError = mock.method(console, "error", () => {});
+
+        assert.doesNotThrow(() => act(() => socket.triggerRawMessage("not json at all")));
+        assert.equal(calls.length, 0, "a malformed frame reaches no handler");
+        assert.ok(consoleError.mock.callCount() > 0, "the drop is logged");
+
+        // The connection is untouched: the next well-formed frame still lands.
+        act(() => socket.triggerMessage({ type: "after-malformed", data: {} }));
+        assert.deepEqual(calls, ["after-malformed"]);
+        assert.equal(socket.readyState, MockWebSocket.OPEN);
+
+        consoleError.mock.restore();
+        unmount();
+    });
+
+    it("drops well-formed JSON that is not an object", async () => {
+        // `JSON.parse` happily returns null, numbers and strings; destructuring
+        // `type`/`data` off those is what the second guard prevents.
+        globalThis.fetch = mock.fn(async () => jsonResponse({ ticket: "tix" }));
+        const { result, unmount } = renderHook(() => useSessionWebSocketContext(), { wrapper });
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        const socket = MockWebSocket.instances[0];
+        act(() => socket.triggerOpen());
+
+        const calls = [];
+        act(() => {
+            result.current.addMessageHandler((type) => calls.push(type));
+        });
+
+        for (const frame of ["null", "42", '"a string"']) {
+            assert.doesNotThrow(() => act(() => socket.triggerRawMessage(frame)));
+        }
+
+        assert.equal(calls.length, 0);
+        assert.equal(socket.readyState, MockWebSocket.OPEN);
 
         unmount();
     });
