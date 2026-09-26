@@ -27,7 +27,7 @@ jobs:
     # time, in a package three apps depend on.
     build:
         name: Build + typecheck
-        runs-on: ${{ (inputs.runner == 'github-hosted' || vars.CI_RUNNER == 'github-hosted') && 'ubuntu-latest' || fromJSON('["self-hosted", "node"]') }}
+        runs-on: ${{ (inputs.runner == 'github-hosted' || vars.CI_RUNNER == 'github-hosted') && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "node"]') }}
         timeout-minutes: 15
 
         steps:
