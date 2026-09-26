@@ -4,6 +4,15 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner environment to execute on'
+        required: false
+        default: 'self-hosted'
+        type: choice
+        options:
+          - self-hosted
+          - github-hosted
 
 permissions:
   contents: read
@@ -11,10 +20,7 @@ permissions:
 
 jobs:
   publish:
-    # GitHub-hosted: this repo is public, so hosted minutes are free, and the
-    # self-hosted pool has not taken a job since 2026-09-19 (System-B90/.github#30).
-    # Only jobs that need Docker-in-Docker stay on [self-hosted, dind].
-    runs-on: ubuntu-latest
+    runs-on: ${{ (inputs.runner == 'github-hosted' || vars.CI_RUNNER == 'github-hosted') && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "node"]') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
