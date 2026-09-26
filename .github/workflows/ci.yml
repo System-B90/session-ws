@@ -26,7 +26,7 @@ jobs:
     # broken build therefore surfaced at release time instead of at review
     # time, in a package three apps depend on.
     build:
-        name: Build + typecheck
+        name: Build + Typecheck
         runs-on: ${{ (inputs.runner == 'github-hosted' || vars.CI_RUNNER == 'github-hosted') && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "node"]') }}
         timeout-minutes: 15
 

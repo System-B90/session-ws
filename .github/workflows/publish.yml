@@ -1,4 +1,4 @@
-name: Publish package
+name: Publish
 
 on:
   release:
@@ -20,6 +20,7 @@ permissions:
 
 jobs:
   publish:
+    name: Publish
     runs-on: ${{ (inputs.runner == 'github-hosted' || vars.CI_RUNNER == 'github-hosted') && 'ubuntu-latest' || fromJSON('["self-hosted", "Linux", "node"]') }}
     timeout-minutes: 15
     steps:
